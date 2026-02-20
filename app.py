@@ -3,7 +3,7 @@ import pandas as pd
 import re
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-MY_NAME = "Iván Nicolás Gutiérrez Arias"
+MY_NAME_DEFAULT = "Iván Nicolás Gutiérrez Arias"
 
 GAMES = ["Tango", "Queens", "Zip", "Mini Sudoku"]
 
@@ -189,6 +189,17 @@ def main():
     st.title("🎮 LinkedIn Games Tracker")
     st.caption("Compare your LinkedIn mini-game scores against your contacts.")
 
+    my_name  = st.text_input(
+        "Your LinkedIn name (exactly as it appears in messages)",
+        value=MY_NAME_DEFAULT,
+        key="my_name",
+    ).strip()
+    my_first = my_name.split()[0] if my_name else "Me"
+
+    if not my_name:
+        st.warning("Enter your LinkedIn name above to get started.")
+        return
+
     # ── Data input tabs ────────────────────────────────────────────────────────
     tab_csv, tab_convo = st.tabs(["📁 CSV Export", "💬 Conversation"])
 
@@ -258,18 +269,18 @@ def main():
                 st.warning("No conversation text provided.")
             else:
                 records, names_detected = parse_conversation(
-                    convo_text, MY_NAME, contact_input.strip()
+                    convo_text, my_name, contact_input.strip()
                 )
                 if not names_detected:
                     st.error(
-                        f"Could not find **{MY_NAME}** or **{contact_input.strip()}** "
+                        f"Could not find **{my_name}** or **{contact_input.strip()}** "
                         "in the text. Make sure the names match exactly as they appear "
                         "in LinkedIn."
                     )
                 elif not records:
                     st.warning("Names were found but no game results were detected.")
                 else:
-                    my_count = sum(1 for r in records if r["sender"] == MY_NAME)
+                    my_count = sum(1 for r in records if r["sender"] == my_name)
                     co_count = len(records) - my_count
                     first    = contact_input.strip().split()[0]
                     st.session_state.manual_results = pd.concat(
@@ -278,7 +289,7 @@ def main():
                     )
                     st.success(
                         f"Added {len(records)} result{'s' if len(records) > 1 else ''}: "
-                        f"{my_count} for Iván, {co_count} for {first}."
+                        f"{my_count} for {my_first}, {co_count} for {first}."
                     )
                     st.rerun()
 
@@ -292,7 +303,7 @@ def main():
             st.caption("**Conversations loaded:**")
             summary = (
                 st.session_state.manual_results[
-                    st.session_state.manual_results["sender"] != MY_NAME
+                    st.session_state.manual_results["sender"] != my_name
                 ]
                 .groupby("sender")
                 .size()
@@ -308,15 +319,15 @@ def main():
         st.info("Add data above to get started — upload a CSV or load a conversation.")
         return
 
-    if MY_NAME not in results["sender"].unique():
+    if my_name not in results["sender"].unique():
         st.error(
-            f"Your name **{MY_NAME}** was not found in the data.\n\n"
+            f"Your name **{my_name}** was not found in the data.\n\n"
             "Make sure you're uploading your own LinkedIn CSV export, or that "
             "your name appears in the pasted conversation."
         )
         return
 
-    contacts = sorted(s for s in results["sender"].unique() if s != MY_NAME)
+    contacts = sorted(s for s in results["sender"].unique() if s != my_name)
 
     if not contacts:
         st.warning("No contacts with game results found.")
@@ -338,11 +349,11 @@ def main():
     if not contact:
         return
 
-    scores        = compute_scores(results, MY_NAME, contact)
+    scores        = compute_scores(results, my_name, contact)
     contact_first = contact.split()[0]
 
     # ── Per-game scorecards ────────────────────────────────────────────────────
-    st.markdown(f"## Iván vs {contact}")
+    st.markdown(f"## {my_first} vs {contact}")
     cols   = st.columns(len(GAMES))
     totals = {"me": 0, "contact": 0, "tie": 0}
 
@@ -359,7 +370,7 @@ def main():
                 st.caption("No shared games yet.")
             else:
                 if g["me"] > g["contact"]:
-                    leader = "Iván leads 🏆"
+                    leader = f"{my_first} leads 🏆"
                 elif g["contact"] > g["me"]:
                     leader = f"{contact_first} leads 🏆"
                 else:
@@ -367,7 +378,7 @@ def main():
                 st.caption(f"{played} games · {leader}")
 
                 c1, c2 = st.columns(2)
-                c1.metric("Iván", g["me"])
+                c1.metric(my_first, g["me"])
                 c2.metric(contact_first, g["contact"])
                 if g["tie"] > 0:
                     st.caption(f"🤝 {g['tie']} tie{'s' if g['tie'] > 1 else ''}")
@@ -377,7 +388,7 @@ def main():
     st.markdown("## 🏆 Total Score")
 
     tc = st.columns(3)
-    tc[0].metric("Iván", totals["me"])
+    tc[0].metric(my_first, totals["me"])
     tc[1].metric(contact_first, totals["contact"])
     tc[2].metric("Ties", totals["tie"])
 
@@ -385,7 +396,7 @@ def main():
     if overall_played == 0:
         st.info("No head-to-head games found for this contact.")
     elif totals["me"] > totals["contact"]:
-        st.success("Iván is winning overall! 🎉")
+        st.success(f"{my_first} is winning overall! 🎉")
     elif totals["contact"] > totals["me"]:
         st.warning(f"{contact_first} is winning overall!")
     else:
@@ -404,9 +415,9 @@ def main():
             duel_df["my_time"]      = duel_df["my_time"].apply(fmt_time)
             duel_df["contact_time"] = duel_df["contact_time"].apply(fmt_time)
             duel_df["winner"]       = duel_df["winner"].map(
-                {"me": "Iván", "contact": contact_first, "tie": "Tie 🤝"}
+                {"me": my_first, "contact": contact_first, "tie": "Tie 🤝"}
             )
-            duel_df.columns = ["Puzzle #", "Iván", contact_first, "Winner"]
+            duel_df.columns = ["Puzzle #", my_first, contact_first, "Winner"]
             st.dataframe(duel_df, use_container_width=True, hide_index=True)
         if not any_duels:
             st.caption("No shared puzzles found for this contact.")
