@@ -15,11 +15,9 @@ GAME_ICONS = {
 }
 
 # Matches all four game formats:
-#   "Tango n.º 240 | 0:46"
-#   "Queens n.º 400 | 1:32"
-#   "Mini Sudoku n.º 193 | 1:41"
-#   "Zip #78 | 0:13"
-# Mini Sudoku must appear first in the alternation to avoid partial matches.
+#   "Tango n.º 240 | 0:46"      "Queens n.º 400 | 1:32"
+#   "Mini Sudoku n.º 193 | 1:41" "Zip #78 | 0:13"
+# Mini Sudoku must appear first to avoid partial matches.
 GAME_RE = re.compile(
     r"(Mini Sudoku|Tango|Queens|Zip)"
     r"\s+(?:n\.?[º°]|#)\s*(\d+)"
@@ -70,7 +68,6 @@ def parse_conversation(text: str, my_name: str, contact_name: str) -> tuple[list
         pos  = m.start()
         game = next((g for g in GAMES if g.lower() == m.group(1).lower()), m.group(1))
 
-        # Walk backwards through markers to find the last speaker before this result
         sender = None
         for sp_pos, sp_name in reversed(speaker_markers):
             if sp_pos < pos:
@@ -126,7 +123,7 @@ def parse_messages(df: pd.DataFrame) -> pd.DataFrame:
 
 def merge_results(csv_df: pd.DataFrame, manual_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Combine CSV and manually-pasted results.
+    Combine CSV and conversation results.
     For the same (sender, game, puzzle_num), keep the minimum (best) time.
     """
     if manual_df.empty:
@@ -186,126 +183,97 @@ def main():
         layout="wide",
     )
 
-    # ── Session state ──────────────────────────────────────────────────────────
     if "manual_results" not in st.session_state:
         st.session_state.manual_results = _EMPTY_RESULTS.copy()
 
     st.title("🎮 LinkedIn Games Tracker")
     st.caption("Compare your LinkedIn mini-game scores against your contacts.")
 
-    # ── File upload ────────────────────────────────────────────────────────────
-    uploaded = st.file_uploader("Upload your LinkedIn `messages.csv`", type=["csv"])
+    # ── Data input tabs ────────────────────────────────────────────────────────
+    tab_csv, tab_convo = st.tabs(["📁 CSV Export", "💬 Conversation"])
 
-    if uploaded is None:
-        st.info(
-            "⬆️ Upload a LinkedIn messages export to get started.\n\n"
+    csv_results = _EMPTY_RESULTS.copy()
+
+    # Tab 1: Full LinkedIn CSV export ──────────────────────────────────────────
+    with tab_csv:
+        st.markdown(
+            "Upload your full LinkedIn message history. "
             "**How to export:** LinkedIn → Settings → Data Privacy → "
             "Get a copy of your data → Messages"
         )
-        return
+        uploaded = st.file_uploader("Choose `messages.csv`", type=["csv"])
+        if uploaded is not None:
+            try:
+                df = pd.read_csv(uploaded)
+                missing_cols = {"FROM", "CONTENT", "DATE"} - {c.upper() for c in df.columns}
+                if missing_cols:
+                    st.error(
+                        f"Missing columns: **{missing_cols}**\n\n"
+                        f"Columns in your file: `{list(df.columns)}`"
+                    )
+                else:
+                    csv_results = parse_messages(df)
+                    if csv_results.empty:
+                        st.warning("No game results found in the CSV.")
+                    else:
+                        st.success(f"Loaded {len(csv_results)} game results from CSV.")
+            except Exception as e:
+                st.error(f"Could not read CSV: {e}")
 
-    try:
-        df = pd.read_csv(uploaded)
-    except Exception as e:
-        st.error(f"Could not read the CSV file: {e}")
-        return
-
-    missing_cols = {"FROM", "CONTENT", "DATE"} - {c.upper() for c in df.columns}
-    if missing_cols:
-        st.error(
-            f"Expected columns not found: **{missing_cols}**\n\n"
-            f"Columns in your file: `{list(df.columns)}`"
-        )
-        return
-
-    csv_results = parse_messages(df)
-    results     = merge_results(csv_results, st.session_state.manual_results)
-
-    if results.empty:
-        st.warning("No recognised game results were found.")
-        return
-
-    all_senders = results["sender"].unique().tolist()
-
-    if MY_NAME not in all_senders:
-        st.error(
-            f"Your name **{MY_NAME}** was not found among message senders.\n\n"
-            f"Detected senders: {all_senders}\n\n"
-            "Edit the `MY_NAME` constant at the top of `app.py` if needed."
-        )
-        return
-
-    contacts = sorted(s for s in all_senders if s != MY_NAME)
-
-    if not contacts:
-        st.warning("No other contacts with game results were found.")
-        return
-
-    # ── Sidebar ────────────────────────────────────────────────────────────────
-    with st.sidebar:
-        # Overview metrics
-        st.header("📊 Overview")
-        manual_count = len(st.session_state.manual_results)
-        st.metric("Game results (CSV)",    len(csv_results))
-        st.metric("Manually added",        manual_count)
-        st.metric("Total",                 len(results))
-        st.metric("Contacts with results", len(contacts))
-        st.markdown("**Results by game**")
-        st.bar_chart(results["game"].value_counts())
-
-        st.divider()
-
-        # ── Paste recent messages ──────────────────────────────────────────────
-        st.subheader("✍️ Add recent messages")
-        st.caption(
-            "Open a LinkedIn conversation, select all, copy, and paste below. "
-            "Speaker attribution is detected automatically."
+    # Tab 2: Individual conversation (paste or .txt upload) ────────────────────
+    with tab_convo:
+        st.markdown(
+            "Open any LinkedIn conversation, select all (Ctrl+A / Cmd+A), copy, "
+            "then either paste below or save it as a `.txt` file and upload it. "
+            "Speaker attribution is detected automatically from the message headers."
         )
 
-        # Contact picker: existing contacts + free-text for new ones
-        NEW_CONTACT = "— New contact —"
-        paste_contact_pick = st.selectbox(
-            "Contact", contacts + [NEW_CONTACT], key="paste_contact_pick"
+        contact_input = st.text_input(
+            "Contact's full name (exactly as it appears in LinkedIn)",
+            placeholder="e.g. Jorge Herrera Toro",
+            key="convo_contact",
         )
-        if paste_contact_pick == NEW_CONTACT:
-            paste_contact = st.text_input(
-                "Enter contact name", key="new_contact_name"
-            ).strip()
-        else:
-            paste_contact = paste_contact_pick
 
+        txt_file = st.file_uploader("Upload `.txt` file", type=["txt"], key="txt_upload")
         convo_paste = st.text_area(
-            "Full conversation",
-            height=220,
+            "Or paste the conversation directly",
+            height=180,
             key="convo_paste",
             placeholder="Paste the full LinkedIn conversation here…",
         )
 
-        btn_add, btn_clear = st.columns(2)
+        # Prefer the uploaded file; fall back to the text area
+        if txt_file is not None:
+            convo_text = txt_file.getvalue().decode("utf-8", errors="replace")
+            st.caption(f"Using file: **{txt_file.name}**")
+        else:
+            convo_text = convo_paste
 
-        if btn_add.button("Add", use_container_width=True, type="primary"):
-            if not paste_contact:
-                st.error("Select or enter a contact name first.")
-            elif not convo_paste.strip():
-                st.warning("Paste some conversation text first.")
+        btn_add, btn_clear, _ = st.columns([1, 1, 4])
+
+        if btn_add.button("Process & Add", type="primary", key="btn_add"):
+            if not contact_input.strip():
+                st.error("Enter the contact's full name first.")
+            elif not convo_text.strip():
+                st.warning("No conversation text provided.")
             else:
                 records, names_detected = parse_conversation(
-                    convo_paste, MY_NAME, paste_contact
+                    convo_text, MY_NAME, contact_input.strip()
                 )
                 if not names_detected:
                     st.error(
-                        f"Could not find **{MY_NAME}** or **{paste_contact}** "
-                        "in the pasted text. Make sure the full names match exactly."
+                        f"Could not find **{MY_NAME}** or **{contact_input.strip()}** "
+                        "in the text. Make sure the names match exactly as they appear "
+                        "in LinkedIn."
                     )
                 elif not records:
                     st.warning("Names were found but no game results were detected.")
                 else:
                     my_count = sum(1 for r in records if r["sender"] == MY_NAME)
                     co_count = len(records) - my_count
-                    first    = paste_contact.split()[0]
-                    new_df   = pd.DataFrame(records)
+                    first    = contact_input.strip().split()[0]
                     st.session_state.manual_results = pd.concat(
-                        [st.session_state.manual_results, new_df],
+                        [st.session_state.manual_results, pd.DataFrame(records)],
                         ignore_index=True,
                     )
                     st.success(
@@ -314,11 +282,58 @@ def main():
                     )
                     st.rerun()
 
-        if btn_clear.button("Clear all", use_container_width=True):
+        if btn_clear.button("Clear all", key="btn_clear"):
             st.session_state.manual_results = _EMPTY_RESULTS.copy()
             st.rerun()
 
+        # Summary of conversations already loaded
+        if not st.session_state.manual_results.empty:
+            st.divider()
+            st.caption("**Conversations loaded:**")
+            summary = (
+                st.session_state.manual_results[
+                    st.session_state.manual_results["sender"] != MY_NAME
+                ]
+                .groupby("sender")
+                .size()
+                .reset_index(name="n")
+            )
+            for _, row in summary.iterrows():
+                st.caption(f"• {row['sender']}: {row['n']} results")
+
+    # ── Merge all sources ──────────────────────────────────────────────────────
+    results = merge_results(csv_results, st.session_state.manual_results)
+
+    if results.empty:
+        st.info("Add data above to get started — upload a CSV or load a conversation.")
+        return
+
+    if MY_NAME not in results["sender"].unique():
+        st.error(
+            f"Your name **{MY_NAME}** was not found in the data.\n\n"
+            "Make sure you're uploading your own LinkedIn CSV export, or that "
+            "your name appears in the pasted conversation."
+        )
+        return
+
+    contacts = sorted(s for s in results["sender"].unique() if s != MY_NAME)
+
+    if not contacts:
+        st.warning("No contacts with game results found.")
+        return
+
+    # ── Sidebar: overview ──────────────────────────────────────────────────────
+    with st.sidebar:
+        st.header("📊 Overview")
+        st.metric("CSV results",    len(csv_results))
+        st.metric("Manual results", len(st.session_state.manual_results))
+        st.metric("Total",          len(results))
+        st.metric("Contacts",       len(contacts))
+        st.markdown("**Results by game**")
+        st.bar_chart(results["game"].value_counts())
+
     # ── Contact selector ───────────────────────────────────────────────────────
+    st.divider()
     contact = st.selectbox("🔍 Compare against:", contacts)
     if not contact:
         return
