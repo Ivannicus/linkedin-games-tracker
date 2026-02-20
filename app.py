@@ -3,8 +3,6 @@ import pandas as pd
 import re
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-MY_NAME_DEFAULT = "Iván Nicolás Gutiérrez Arias"
-
 GAMES = ["Tango", "Queens", "Zip", "Mini Sudoku"]
 
 GAME_ICONS = {
@@ -15,8 +13,8 @@ GAME_ICONS = {
 }
 
 # Matches all four game formats:
-#   "Tango n.º 240 | 0:46"      "Queens n.º 400 | 1:32"
-#   "Mini Sudoku n.º 193 | 1:41" "Zip #78 | 0:13"
+#   "Tango n.º 240 | 0:46"       "Queens n.º 400 | 1:32"
+#   "Mini Sudoku n.º 193 | 1:41"  "Zip #78 | 0:13"
 # Mini Sudoku must appear first to avoid partial matches.
 GAME_RE = re.compile(
     r"(Mini Sudoku|Tango|Queens|Zip)"
@@ -39,6 +37,42 @@ def fmt_time(total_seconds: int) -> str:
     return f"{total_seconds // 60}:{total_seconds % 60:02d}"
 
 
+def detect_speakers(text: str) -> list[str]:
+    """
+    Extract unique speaker names from a LinkedIn conversation.
+
+    LinkedIn message headers have the format  "Full Name   HH:MM"  — the name
+    is followed by 2+ spaces then the time at the end of the line.  This is
+    distinct from the transition line "Name ha enviado … a las HH:MM", which
+    only has a single space before the time, so it is correctly ignored.
+    """
+    pattern = re.compile(r"^(.+?)\s{2,}\d{1,2}:\d{2}\s*$", re.MULTILINE)
+    seen: set[str] = set()
+    names: list[str] = []
+    for m in pattern.finditer(text):
+        name = m.group(1).strip()
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def detect_my_name_from_csv(df: pd.DataFrame) -> str | None:
+    """
+    Detect the app user's name from a LinkedIn CSV export.
+
+    The user is the sender who appears in the most distinct Conversation IDs —
+    they participate in every conversation, while each contact only appears in one.
+    """
+    col_map  = {c.upper(): c for c in df.columns}
+    from_col  = col_map.get("FROM")
+    convo_col = col_map.get("CONVERSATION ID")
+    if not from_col or not convo_col:
+        return None
+    counts = df.groupby(from_col)[convo_col].nunique()
+    return str(counts.idxmax()) if not counts.empty else None
+
+
 def parse_conversation(text: str, my_name: str, contact_name: str) -> tuple[list[dict], bool]:
     """
     Parse a full copy-pasted LinkedIn conversation.
@@ -51,8 +85,6 @@ def parse_conversation(text: str, my_name: str, contact_name: str) -> tuple[list
     Returns (records, names_were_detected).
     """
     def speaker_re(name: str) -> re.Pattern:
-        # Matches a line that STARTS with the full name followed by any whitespace
-        # (covers "Name   8:41" and "Name ha enviado los siguientes mensajes…")
         return re.compile(r"^" + re.escape(name) + r"\s", re.IGNORECASE | re.MULTILINE)
 
     speaker_markers: list[tuple[int, str]] = []
@@ -89,9 +121,9 @@ def parse_conversation(text: str, my_name: str, contact_name: str) -> tuple[list
 def parse_messages(df: pd.DataFrame) -> pd.DataFrame:
     """Parse the raw LinkedIn messages CSV into a tidy game-results table."""
     col = {c.upper(): c for c in df.columns}
-    from_col    = col.get("FROM",    None)
-    content_col = col.get("CONTENT", None)
-    date_col    = col.get("DATE",    None)
+    from_col    = col.get("FROM")
+    content_col = col.get("CONTENT")
+    date_col    = col.get("DATE")
 
     records = []
     for _, row in df.iterrows():
@@ -183,22 +215,23 @@ def main():
         layout="wide",
     )
 
+    # ── Session state ──────────────────────────────────────────────────────────
     if "manual_results" not in st.session_state:
         st.session_state.manual_results = _EMPTY_RESULTS.copy()
+    if "my_name" not in st.session_state:
+        st.session_state.my_name = None
 
     st.title("🎮 LinkedIn Games Tracker")
     st.caption("Compare your LinkedIn mini-game scores against your contacts.")
 
-    my_name  = st.text_input(
-        "Your LinkedIn name (exactly as it appears in messages)",
-        value=MY_NAME_DEFAULT,
-        key="my_name",
-    ).strip()
-    my_first = my_name.split()[0] if my_name else "Me"
-
-    if not my_name:
-        st.warning("Enter your LinkedIn name above to get started.")
-        return
+    # Identity banner — shown once identity is known, with a Change button
+    if st.session_state.my_name:
+        id_col, change_col = st.columns([9, 1])
+        id_col.caption(f"Showing results as: **{st.session_state.my_name}**")
+        if change_col.button("Change", key="reset_identity"):
+            st.session_state.my_name = None
+            st.session_state.manual_results = _EMPTY_RESULTS.copy()
+            st.rerun()
 
     # ── Data input tabs ────────────────────────────────────────────────────────
     tab_csv, tab_convo = st.tabs(["📁 CSV Export", "💬 Conversation"])
@@ -216,13 +249,19 @@ def main():
         if uploaded is not None:
             try:
                 df = pd.read_csv(uploaded)
-                missing_cols = {"FROM", "CONTENT", "DATE"} - {c.upper() for c in df.columns}
-                if missing_cols:
+                missing = {"FROM", "CONTENT", "DATE"} - {c.upper() for c in df.columns}
+                if missing:
                     st.error(
-                        f"Missing columns: **{missing_cols}**\n\n"
-                        f"Columns in your file: `{list(df.columns)}`"
+                        f"Missing columns: **{missing}**\n\n"
+                        f"Columns found: `{list(df.columns)}`"
                     )
                 else:
+                    # Auto-detect identity from conversation participation
+                    if st.session_state.my_name is None:
+                        detected = detect_my_name_from_csv(df)
+                        if detected:
+                            st.session_state.my_name = detected
+
                     csv_results = parse_messages(df)
                     if csv_results.empty:
                         st.warning("No game results found in the CSV.")
@@ -235,14 +274,8 @@ def main():
     with tab_convo:
         st.markdown(
             "Open any LinkedIn conversation, select all (Ctrl+A / Cmd+A), copy, "
-            "then either paste below or save it as a `.txt` file and upload it. "
-            "Speaker attribution is detected automatically from the message headers."
-        )
-
-        contact_input = st.text_input(
-            "Contact's full name (exactly as it appears in LinkedIn)",
-            placeholder="e.g. Jorge Herrera Toro",
-            key="convo_contact",
+            "then upload as a `.txt` file or paste below. "
+            "Speakers are detected automatically from the message headers."
         )
 
         txt_file = st.file_uploader("Upload `.txt` file", type=["txt"], key="txt_upload")
@@ -253,57 +286,77 @@ def main():
             placeholder="Paste the full LinkedIn conversation here…",
         )
 
-        # Prefer the uploaded file; fall back to the text area
+        convo_text = (
+            txt_file.getvalue().decode("utf-8", errors="replace")
+            if txt_file is not None
+            else convo_paste
+        )
         if txt_file is not None:
-            convo_text = txt_file.getvalue().decode("utf-8", errors="replace")
             st.caption(f"Using file: **{txt_file.name}**")
-        else:
-            convo_text = convo_paste
 
-        btn_add, btn_clear, _ = st.columns([1, 1, 4])
+        if convo_text.strip():
+            speakers = detect_speakers(convo_text)
 
-        if btn_add.button("Process & Add", type="primary", key="btn_add"):
-            if not contact_input.strip():
-                st.error("Enter the contact's full name first.")
-            elif not convo_text.strip():
-                st.warning("No conversation text provided.")
-            else:
-                records, names_detected = parse_conversation(
-                    convo_text, my_name, contact_input.strip()
+            if not speakers:
+                st.warning(
+                    "Could not detect any speaker names. "
+                    "Make sure the conversation includes message headers (e.g. "
+                    "\"Full Name   8:41\")."
                 )
-                if not names_detected:
-                    st.error(
-                        f"Could not find **{my_name}** or **{contact_input.strip()}** "
-                        "in the text. Make sure the names match exactly as they appear "
-                        "in LinkedIn."
-                    )
-                elif not records:
-                    st.warning("Names were found but no game results were detected.")
-                else:
-                    my_count = sum(1 for r in records if r["sender"] == my_name)
-                    co_count = len(records) - my_count
-                    first    = contact_input.strip().split()[0]
-                    st.session_state.manual_results = pd.concat(
-                        [st.session_state.manual_results, pd.DataFrame(records)],
-                        ignore_index=True,
-                    )
-                    st.success(
-                        f"Added {len(records)} result{'s' if len(records) > 1 else ''}: "
-                        f"{my_count} for {my_first}, {co_count} for {first}."
-                    )
-                    st.rerun()
 
-        if btn_clear.button("Clear all", key="btn_clear"):
-            st.session_state.manual_results = _EMPTY_RESULTS.copy()
-            st.rerun()
+            elif st.session_state.my_name is None:
+                # ── Identity unknown: ask which speaker the user is ────────────
+                st.markdown("**Detected speakers — which one are you?**")
+                btn_cols = st.columns(min(len(speakers), 2))
+                for i, sp in enumerate(speakers[:2]):
+                    if btn_cols[i].button(sp, key=f"iam_{i}", use_container_width=True):
+                        st.session_state.my_name = sp
+                        st.rerun()
+
+            else:
+                # ── Identity known: contact is the other speaker ───────────────
+                my_name = st.session_state.my_name
+                contact = next((s for s in speakers if s != my_name), None)
+
+                if contact is None:
+                    st.warning(
+                        f"Only **{my_name.split()[0]}** was detected in this conversation — "
+                        "no contact results to add."
+                    )
+                else:
+                    st.caption(f"You: **{my_name}** · Contact: **{contact}**")
+
+                    btn_add, btn_clear, _ = st.columns([1, 1, 4])
+
+                    if btn_add.button("Process & Add", type="primary", key="btn_add"):
+                        records, _ = parse_conversation(convo_text, my_name, contact)
+                        if records:
+                            my_count = sum(1 for r in records if r["sender"] == my_name)
+                            co_count = len(records) - my_count
+                            st.session_state.manual_results = pd.concat(
+                                [st.session_state.manual_results, pd.DataFrame(records)],
+                                ignore_index=True,
+                            )
+                            st.success(
+                                f"Added {len(records)} result{'s' if len(records) > 1 else ''}: "
+                                f"{my_count} for {my_name.split()[0]}, "
+                                f"{co_count} for {contact.split()[0]}."
+                            )
+                            st.rerun()
+                        else:
+                            st.warning("No game results found in this conversation.")
+
+                    if btn_clear.button("Clear all", key="btn_clear"):
+                        st.session_state.manual_results = _EMPTY_RESULTS.copy()
+                        st.rerun()
 
         # Summary of conversations already loaded
-        if not st.session_state.manual_results.empty:
+        if not st.session_state.manual_results.empty and st.session_state.my_name:
             st.divider()
             st.caption("**Conversations loaded:**")
             summary = (
                 st.session_state.manual_results[
-                    st.session_state.manual_results["sender"] != my_name
+                    st.session_state.manual_results["sender"] != st.session_state.my_name
                 ]
                 .groupby("sender")
                 .size()
@@ -313,7 +366,14 @@ def main():
                 st.caption(f"• {row['sender']}: {row['n']} results")
 
     # ── Merge all sources ──────────────────────────────────────────────────────
-    results = merge_results(csv_results, st.session_state.manual_results)
+    my_name = st.session_state.my_name
+
+    if my_name is None:
+        st.info("Upload a CSV or paste a conversation to get started.")
+        return
+
+    my_first = my_name.split()[0]
+    results  = merge_results(csv_results, st.session_state.manual_results)
 
     if results.empty:
         st.info("Add data above to get started — upload a CSV or load a conversation.")
@@ -321,9 +381,9 @@ def main():
 
     if my_name not in results["sender"].unique():
         st.error(
-            f"Your name **{my_name}** was not found in the data.\n\n"
-            "Make sure you're uploading your own LinkedIn CSV export, or that "
-            "your name appears in the pasted conversation."
+            f"**{my_name}** was not found in the data.\n\n"
+            "Make sure you're uploading your own LinkedIn CSV, or that your name "
+            "appears in the pasted conversation."
         )
         return
 
