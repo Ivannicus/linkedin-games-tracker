@@ -3,6 +3,9 @@ import pandas as pd
 import re
 
 # ── Configuration ──────────────────────────────────────────────────────────────
+CSV_SIZE_LIMIT_MB = 50   # LinkedIn personal exports are typically < 5 MB
+TXT_SIZE_LIMIT_MB = 2
+
 GAMES = ["Tango", "Queens", "Zip", "Mini Sudoku"]
 
 GAME_ICONS = {
@@ -29,6 +32,13 @@ _EMPTY_RESULTS = pd.DataFrame(
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+_MD_SPECIAL = re.compile(r"[*_`\[\]()#<>!|\\]")
+
+def safe_md(text: str) -> str:
+    """Strip Markdown special characters from user-derived strings before rendering."""
+    return _MD_SPECIAL.sub("", text)
+
+
 def to_seconds(minutes: str, seconds: str) -> int:
     return int(minutes) * 60 + int(seconds)
 
@@ -224,10 +234,21 @@ def main():
     st.title("🎮 LinkedIn Games Tracker")
     st.caption("Compare your LinkedIn mini-game scores against your contacts.")
 
+    with st.expander("🔒 Privacy & data handling", expanded=False):
+        st.markdown(
+            "- **Nothing is stored.** Uploaded files are processed in memory and "
+            "discarded when you close the tab.\n"
+            "- **No third parties receive your data** when running locally. "
+            "If hosted on Streamlit Community Cloud, files transit their servers "
+            "over HTTPS but are not persisted.\n"
+            "- The app only reads game-result lines from your messages — "
+            "no other message content is used or displayed."
+        )
+
     # Identity banner — shown once identity is known, with a Change button
     if st.session_state.my_name:
         id_col, change_col = st.columns([9, 1])
-        id_col.caption(f"Showing results as: **{st.session_state.my_name}**")
+        id_col.caption(f"Showing results as: **{safe_md(st.session_state.my_name)}**")
         if change_col.button("Change", key="reset_identity"):
             st.session_state.my_name = None
             st.session_state.manual_results = _EMPTY_RESULTS.copy()
@@ -247,28 +268,34 @@ def main():
         )
         uploaded = st.file_uploader("Choose `messages.csv`", type=["csv"])
         if uploaded is not None:
-            try:
-                df = pd.read_csv(uploaded)
-                missing = {"FROM", "CONTENT", "DATE"} - {c.upper() for c in df.columns}
-                if missing:
-                    st.error(
-                        f"Missing columns: **{missing}**\n\n"
-                        f"Columns found: `{list(df.columns)}`"
-                    )
-                else:
-                    # Auto-detect identity from conversation participation
-                    if st.session_state.my_name is None:
-                        detected = detect_my_name_from_csv(df)
-                        if detected:
-                            st.session_state.my_name = detected
-
-                    csv_results = parse_messages(df)
-                    if csv_results.empty:
-                        st.warning("No game results found in the CSV.")
+            if uploaded.size > CSV_SIZE_LIMIT_MB * 1024 * 1024:
+                st.error(
+                    f"File exceeds the {CSV_SIZE_LIMIT_MB} MB limit. "
+                    "LinkedIn personal exports are typically under 5 MB."
+                )
+            else:
+                try:
+                    df = pd.read_csv(uploaded)
+                    missing = {"FROM", "CONTENT", "DATE"} - {c.upper() for c in df.columns}
+                    if missing:
+                        st.error(
+                            f"Missing columns: **{missing}**\n\n"
+                            f"Columns found: `{list(df.columns)}`"
+                        )
                     else:
-                        st.success(f"Loaded {len(csv_results)} game results from CSV.")
-            except Exception as e:
-                st.error(f"Could not read CSV: {e}")
+                        # Auto-detect identity from conversation participation
+                        if st.session_state.my_name is None:
+                            detected = detect_my_name_from_csv(df)
+                            if detected:
+                                st.session_state.my_name = detected
+
+                        csv_results = parse_messages(df)
+                        if csv_results.empty:
+                            st.warning("No game results found in the CSV.")
+                        else:
+                            st.success(f"Loaded {len(csv_results)} game results from CSV.")
+                except Exception as e:
+                    st.error(f"Could not read CSV: {e}")
 
     # Tab 2: Individual conversation (paste or .txt upload) ────────────────────
     with tab_convo:
@@ -286,13 +313,17 @@ def main():
             placeholder="Paste the full LinkedIn conversation here…",
         )
 
+        if txt_file is not None and txt_file.size > TXT_SIZE_LIMIT_MB * 1024 * 1024:
+            st.error(f"File exceeds the {TXT_SIZE_LIMIT_MB} MB limit.")
+            txt_file = None
+
         convo_text = (
             txt_file.getvalue().decode("utf-8", errors="replace")
             if txt_file is not None
             else convo_paste
         )
         if txt_file is not None:
-            st.caption(f"Using file: **{txt_file.name}**")
+            st.caption(f"Using file: {safe_md(txt_file.name)}")
 
         if convo_text.strip():
             speakers = detect_speakers(convo_text)
@@ -320,11 +351,11 @@ def main():
 
                 if contact is None:
                     st.warning(
-                        f"Only **{my_name.split()[0]}** was detected in this conversation — "
+                        f"Only **{safe_md(my_name.split()[0])}** was detected in this conversation — "
                         "no contact results to add."
                     )
                 else:
-                    st.caption(f"You: **{my_name}** · Contact: **{contact}**")
+                    st.caption(f"You: **{safe_md(my_name)}** · Contact: **{safe_md(contact)}**")
 
                     btn_add, btn_clear, _ = st.columns([1, 1, 4])
 
@@ -339,8 +370,8 @@ def main():
                             )
                             st.success(
                                 f"Added {len(records)} result{'s' if len(records) > 1 else ''}: "
-                                f"{my_count} for {my_name.split()[0]}, "
-                                f"{co_count} for {contact.split()[0]}."
+                                f"{my_count} for {safe_md(my_name.split()[0])}, "
+                                f"{co_count} for {safe_md(contact.split()[0])}."
                             )
                             st.rerun()
                         else:
@@ -372,7 +403,7 @@ def main():
         st.info("Upload a CSV or paste a conversation to get started.")
         return
 
-    my_first = my_name.split()[0]
+    my_first = safe_md(my_name.split()[0])
     results  = merge_results(csv_results, st.session_state.manual_results)
 
     if results.empty:
@@ -381,7 +412,7 @@ def main():
 
     if my_name not in results["sender"].unique():
         st.error(
-            f"**{my_name}** was not found in the data.\n\n"
+            f"**{safe_md(my_name)}** was not found in the data.\n\n"
             "Make sure you're uploading your own LinkedIn CSV, or that your name "
             "appears in the pasted conversation."
         )
@@ -410,7 +441,7 @@ def main():
         return
 
     scores        = compute_scores(results, my_name, contact)
-    contact_first = contact.split()[0]
+    contact_first = safe_md(contact.split()[0])
 
     # ── Per-game scorecards ────────────────────────────────────────────────────
     st.markdown(f"## {my_first} vs {contact}")
